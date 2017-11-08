@@ -1,4 +1,4 @@
-APP = app/noc_test4
+APP = app/img_filter
 ARCH = mips/plasma
 
 CPU_ARCH = \"$(ARCH)\"
