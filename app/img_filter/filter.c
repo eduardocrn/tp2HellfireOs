@@ -239,16 +239,17 @@ void master(void){
             delay_ms(20);
 	}
 
-	// printf("\nEnviando KILL");
-	// // matar escravos
-	// poison_package.data.flag = KILL;
-    // for (i = 1; i < hf_ncores(); i++) {
-	// 	hf_sendack(i, 5000, poison_package.raw_data, MSG_SIZE, i, 500);
-	// }
+	printf("\nEnviando KILL");
+    // matar escravos
+    union Package deadpackage;
+	deadpackage.data.flag = KILL;
+    for (i = 1; i < hf_ncores(); i++) {
+        hf_sendack(i, 5000, deadpackage.raw_data, MSG_SIZE, i, 500);
+        delay_ms(40);
+	}
 
 	printf("\n\nend of processing!\n");
 
-    
     hf_kill(hf_selfid());
 }
 
