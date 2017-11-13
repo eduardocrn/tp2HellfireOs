@@ -6,8 +6,7 @@
 #define MASTER 0
 #define BUILDER 1
 
-#define GAUSIAN 0
-#define SOBEL 1
+#define FILTER 0
 
 #define KEEP_ALIVE 0
 #define KILL 3
@@ -128,7 +127,7 @@ void do_gausian(uint8_t block[BLOCK_SIZE][BLOCK_SIZE], uint8_t result[BLOCK_SIZE
                 if (j > 1|| j < BLOCK_SIZE-2){
                     for (k = 0; k < 5; k++){
                         for(l=0; l < 5; l++){
-                            line = (i-2) + k; //2 left border + 1 + 2 right border
+                            line = (i-2) + k;
                             column = (j-2) + l;
                             buffer[k][l] = block[line][column];
                         }
@@ -145,18 +144,22 @@ void do_gausian(uint8_t block[BLOCK_SIZE][BLOCK_SIZE], uint8_t result[BLOCK_SIZE
 /**
  Populate a block, leaving border of size 2
 */
-void create_block(uint8_t matrix[height][width], uint16_t block_line, uint16_t block_column, uint8_t block[BLOCK_SIZE][BLOCK_SIZE]){
-    uint16_t start_line = (block_line * (BLOCK_SIZE-4)), line, column;
-    uint16_t start_column =  (block_column * (BLOCK_SIZE-4));
-    uint8_t i = 2, j;
-    //printf("Creating block with start_line %d and start_column %d\n", start_line, start_column);
-    while (i < BLOCK_SIZE-2){
-        j = 2;
-        while (j < BLOCK_SIZE-2){
-            line = i+start_line-2;
-            column = j+start_column-2;
-            if ((line < height) && (column < width)){
-                block[i][j] = matrix[line][column];
+void create_block(uint8_t image[height][width], uint16_t block_line, uint16_t block_column, uint8_t block[BLOCK_SIZE][BLOCK_SIZE]){
+    uint16_t start_line = (block_line * BLOCK_SIZE), line, column;
+    uint16_t start_column =  (block_column * BLOCK_SIZE);
+    uint8_t i = 0, j;
+    while (i < BLOCK_SIZE){
+        j = 0;
+        while (j < BLOCK_SIZE){
+            line = i + start_line - 2;
+            column = j + start_column - 2;
+
+            if (line < 0 || column < 0) {
+                block[i][j] = 0;
+            } else if ((line < height) && (column < width)){
+                block[i][j] = image[line][column];
+            } else {
+                block[i][j] = 0;
             }
             j++;
         }
@@ -170,13 +173,10 @@ void master(void){
     uint8_t max_workes;
     uint16_t i,j, i_line = 0, j_column = 0;
 
-    // int8_t buf[MSG_SIZE];
-
-    // union Package poison_package;
-
     delay_ms(200);
     
-    max_workes = (hf_ncores()-2); // ignoring master and builder
+    // ignoring master and builder
+    max_workes = (hf_ncores()-2);
 
     next = 2;
 
@@ -193,7 +193,6 @@ void master(void){
 
     // Original image in 2D format
     uint8_t matrix[height][width];
-
     for (i = 0; i < height; i++){
         for (j = 0; j < width; j++){
             matrix[i][j] = image[matrix_pos];
@@ -201,7 +200,6 @@ void master(void){
         }
     }
 
-    // Block to be processed in the slave cpu
     uint8_t block[BLOCK_SIZE][BLOCK_SIZE];
 
 	while (total_blocks > 0) {
@@ -210,7 +208,7 @@ void master(void){
 
             /* Prepare slave message */
             union Package package;
-            package.data.flag = GAUSIAN;
+            package.data.flag = FILTER;
             package.data.block_line = i_line;
             package.data.block_column = j_column;
             for (k = 0; k <BLOCK_SIZE; k++)
@@ -260,20 +258,22 @@ void builder(void) {
     int8_t buf[MSG_SIZE];
     int16_t start_line, start_column, line, column, ch;
     union Package package;
+    uint32_t time;
+
+    time = _readcounter();
 
     block_lines = (height / (BLOCK_SIZE))+2;
     block_columns = (width / (BLOCK_SIZE))+2;
 
     total_blocks = block_lines * block_columns;
     
-    // Original image in 2D format
     uint8_t matrix[height][width];
 
     if (hf_comm_create(hf_selfid(), 6000, 0))
         panic(0xff);
 
     while (total_blocks > 0) {
-        // verifica recprob para ver se tem algo a receber
+        // verifica recprob se tem mensagem
         ch = hf_recvprobe();
         if(ch >= 0 ) {
             // recebe dado do escravo
@@ -281,13 +281,11 @@ void builder(void) {
             if (val){
                 printf("\n[slave %d] hf_recvack(): error %d\n", cpu, val);
             } else {
-                printf("\n[slave %d] Receive block %d,%d \n", hf_cpuid(), package.data.block_line, package.data.block_column);
 
-                // decode buffer into a union to retrieve struct
+                // buffer to struct
                 for (i = 0; i < MSG_SIZE; i++)
                     package.raw_data[i] = buf[i];
-
-                // receive pixels, ignoring border and put into main matrix
+                
                 start_line = package.data.block_line * (BLOCK_SIZE-4);
                 start_column = package.data.block_column * (BLOCK_SIZE-4);                    
                 for (i = 2; i < BLOCK_SIZE-2; i++){
@@ -316,6 +314,9 @@ void builder(void) {
 	// 	hf_sendack(i, 5000, poison_package.raw_data, MSG_SIZE, i, 500);
 	// }
 
+    time = _readcounter() - time;
+    
+    printf("\n Time: %d\n", time);
 
     printf("{CODE}\n");
     printf("\n\nint32_t width = %d, height = %d;\n", width, height);
@@ -333,18 +334,13 @@ void builder(void) {
     printf("{CODE}\n");
 }
 
-/**
-    Receive pixel vector and applies the requested filter
-    Buffer format: [task, position, [pixel_vector]]
-    if task is KILL, then this process must die
-*/
 void slave(void){
-    uint8_t keep_alive = 1, result_block[BLOCK_SIZE][BLOCK_SIZE];
+    uint8_t keep_alive = 1, block[BLOCK_SIZE][BLOCK_SIZE];
     uint16_t cpu, src_port, size, i;
     int16_t val ,ch;
     int8_t buf[MSG_SIZE];
     union Package package;
-    init_block(result_block);
+    init_block(block);
 
     delay_ms(50);
     if (hf_comm_create(hf_selfid(), 5000, 0))
@@ -357,7 +353,7 @@ void slave(void){
             if (val){
                 printf("\n[slave %d] hf_recvack(): error %d\n", cpu, val);
             } else {
-                // decode buffer into a union to retrieve struct
+                // buffer to union
                 for (i = 0; i < MSG_SIZE; i++){
                     package.raw_data[i] = buf[i];
                 }
@@ -365,10 +361,8 @@ void slave(void){
                 if (package.data.flag == KILL){
                     keep_alive = 0;
                 } else {
-                    // package.data.flag = KEEP_ALIVE; 
-
-                    do_gausian(package.data.pixels, result_block);
-                    do_sobel(result_block, package.data.pixels);
+                    do_gausian(package.data.pixels, block);
+                    do_sobel(block, package.data.pixels);
                     
 					delay_ms(random() % 10 + 50);
                     val = hf_sendack(BUILDER, 6000, package.raw_data, MSG_SIZE, hf_cpuid(), 500);
