@@ -3,20 +3,16 @@
 #include <math.h>
 #include "image.h"
 
-// CPU IDs
 #define MASTER 0
+#define BUILDER 1
 
-// Message flags
 #define GAUSIAN 0
 #define SOBEL 1
 
 #define KEEP_ALIVE 0
-#define POISON_PILL 3
-#define RETURN 4
+#define KILL 3
 
-// Block size
 #define BLOCK_SIZE 36
-
 #define MSG_SIZE 1500
 
 uint8_t gausian(uint8_t buffer[5][5]){
@@ -170,33 +166,25 @@ void create_block(uint8_t matrix[height][width], uint16_t block_line, uint16_t b
 }
 
 void master(void){
-    int32_t next_worker = 1, block_lines, block_columns, total_blocks, val, k, l, matrix_pos = 0;
+    int32_t block_lines, block_columns, total_blocks, val, k, l, matrix_pos = 0, next;
     uint8_t max_workes;
     uint16_t i,j, i_line = 0, j_column = 0;
-	int16_t start_line, start_column, line, column, channel, ch;
 
-	uint16_t cpu, src_port, size;
+    // int8_t buf[MSG_SIZE];
 
-	int8_t buf[MSG_SIZE];
-
-	int32_t available_slaves[hf_ncores()-1];
-	for (i=0; i<(hf_ncores()-1); i++) {
-		available_slaves[i] = 1;
-	}
-
-    union Package poison_package;
-
-	union Package package;
+    // union Package poison_package;
 
     delay_ms(200);
-    max_workes = (hf_ncores()-1); // ignoring master
+    
+    max_workes = (hf_ncores()-2); // ignoring master and builder
+
+    next = 2;
 
     block_lines = (height / (BLOCK_SIZE))+2;
     block_columns = (width / (BLOCK_SIZE))+2;
 
-	total_blocks = block_lines + block_columns;
+	total_blocks = block_lines * block_columns;
 
-	// total_work = block_lines + block_lines;
     printf("\n[MASTER] Iniciando... cpu - %d", hf_cpuid());
     printf("\nBlock lines: %d - Block Columns: %d", block_lines-1, block_columns-1);
 
@@ -213,63 +201,14 @@ void master(void){
         }
     }
 
-    // Block to be processed in the worker cpu
+    // Block to be processed in the slave cpu
     uint8_t block[BLOCK_SIZE][BLOCK_SIZE];
 
 	while (total_blocks > 0) {
-		// verifica recprob para ver se tem algo a receber
-		ch = hf_recvprobe();
-		if(ch >= 0 ) {
-			// recebe dado do escravo
-			val = hf_recvack(&cpu, &src_port, buf, &size, ch);
-			if (val){
-				printf("\n[WORKER %d] hf_recvack(): error %d\n", cpu, val);
-			} else {
-				printf("\n[WORKER %d] Receive block %d,%d \n", hf_cpuid(), package.data.block_line, package.data.block_column);
 
-				// decode buffer into a union to retrieve struct
-				for (i = 0; i < MSG_SIZE; i++){
-					package.raw_data[i] = buf[i];
-				}
-
-				// receive pixels, ignoring border and put into main matrix
-				start_line = package.data.block_line * (BLOCK_SIZE-4);
-				start_column = package.data.block_column * (BLOCK_SIZE-4);                    
-				for (i = 2; i < BLOCK_SIZE-2; i++){
-					for (j =2; j < BLOCK_SIZE-2; j++){
-						line = start_line + i - 2;
-						column = start_column + j - 2;
-						if (line < height && column < width)
-							matrix[line][column] = package.data.pixels[i][j];                            
-					}
-				}
-				
-				// atualiza o total_blocks
-				total_blocks--;
-				//libera escravo
-				available_slaves[(cpu-1)] = 1;
-
-				printf("\n Remaning blocks %d", total_blocks);
-			}
-
-			continue;
-		}
-
-		printf("\nFINAL DO MESTRE");
-
-		// envia trabalho para algum disponivel
-		uint32_t slave = 0;
-		for(i=0; i<(hf_ncores()-1); i++) {
-			if (available_slaves[i] == 1) {
-				slave = i+1;
-				break;
-			}
-		}
-		if (slave > 0 && total_blocks > 0) {
-			printf("\nEnviando para %d", slave);
 			create_block(matrix, i_line, j_column, block);
 
-            /* Prepare worker message */
+            /* Prepare slave message */
             union Package package;
             package.data.flag = GAUSIAN;
             package.data.block_line = i_line;
@@ -278,40 +217,113 @@ void master(void){
                 for (l = 0; l < BLOCK_SIZE; l++)
                     package.data.pixels[k][l] = block[k][l];
 
-			val = hf_sendack(slave, 5000, package.raw_data, MSG_SIZE, slave, 700);
-			available_slaves[(slave-1)] = 0;
+			val = hf_sendack(next, 5000, package.raw_data, MSG_SIZE, next, 700);
 
             delay_ms(50); //delay 50 or payback timeout 700
 
             if (val) {
-                printf("\nError sending the message to worker. %d Val = %d \n", next_worker, val);
-				available_slaves[(slave-1)] = 1;
+                printf("\nError sending the message to slave. Val = %d \n", val);
 			}	
 
 			if (j_column < block_columns) {
 				j_column++;
 			}
-			else{
+			else {
 				i_line++;
 				j_column = 0;
-			}
-		}		
+            }
+            
+            total_blocks--;
+            next++;
+            if (next >= max_workes)
+                next = 2;
+
+            delay_ms(20);
 	}
 
-	printf("\nEnviando KILL");
+	// printf("\nEnviando KILL");
 	// // matar escravos
-	// poison_package.data.flag = POISON_PILL;
+	// poison_package.data.flag = KILL;
     // for (i = 1; i < hf_ncores(); i++) {
 	// 	hf_sendack(i, 5000, poison_package.raw_data, MSG_SIZE, i, 500);
 	// }
 
-	printf("{CODE}\n");
+	printf("\n\nend of processing!\n");
+
+    
+    hf_kill(hf_selfid());
+}
+
+void builder(void) {
+    int32_t block_lines, block_columns, total_blocks, val, k, i, j;
+    uint16_t cpu, src_port, size;
+    int8_t buf[MSG_SIZE];
+    int16_t start_line, start_column, line, column, ch;
+    union Package package;
+
+    block_lines = (height / (BLOCK_SIZE))+2;
+    block_columns = (width / (BLOCK_SIZE))+2;
+
+    total_blocks = block_lines * block_columns;
+    
+    // Original image in 2D format
+    uint8_t matrix[height][width];
+
+    if (hf_comm_create(hf_selfid(), 6000, 0))
+        panic(0xff);
+
+    while (total_blocks > 0) {
+        // verifica recprob para ver se tem algo a receber
+        ch = hf_recvprobe();
+        if(ch >= 0 ) {
+            // recebe dado do escravo
+            val = hf_recvack(&cpu, &src_port, buf, &size, ch);
+            if (val){
+                printf("\n[slave %d] hf_recvack(): error %d\n", cpu, val);
+            } else {
+                printf("\n[slave %d] Receive block %d,%d \n", hf_cpuid(), package.data.block_line, package.data.block_column);
+
+                // decode buffer into a union to retrieve struct
+                for (i = 0; i < MSG_SIZE; i++)
+                    package.raw_data[i] = buf[i];
+
+                // receive pixels, ignoring border and put into main matrix
+                start_line = package.data.block_line * (BLOCK_SIZE-4);
+                start_column = package.data.block_column * (BLOCK_SIZE-4);                    
+                for (i = 2; i < BLOCK_SIZE-2; i++){
+                    for (j =2; j < BLOCK_SIZE-2; j++){
+                        line = start_line + i - 2;
+                        column = start_column + j - 2;
+                        if (line < height && column < width)
+                            matrix[line][column] = package.data.pixels[i][j];                            
+                    }
+                }
+                
+                // atualiza o total_blocks
+                total_blocks--;
+
+                printf("\n Remaning blocks %d", total_blocks);
+            }
+
+            continue;
+        }
+    }
+
+    // printf("\nEnviando KILL");
+	// // matar escravos
+	// poison_package.data.flag = KILL;
+    // for (i = 1; i < hf_ncores(); i++) {
+	// 	hf_sendack(i, 5000, poison_package.raw_data, MSG_SIZE, i, 500);
+	// }
+
+
+    printf("{CODE}\n");
     printf("\n\nint32_t width = %d, height = %d;\n", width, height);
     printf("uint8_t image[] = {\n");
+    k = 0;
     for (i = 0; i < height; i++){
         for (j = 0; j < width; j++){
             printf("0x%x", matrix[i][j]);
-            //printf("0x%x", img[i * width + j]);
             if ((i < height-1) || (j < width-1)) printf(", ");
             if ((++k % 16) == 0) printf("\n");
         }
@@ -319,26 +331,20 @@ void master(void){
     printf("};\n");
 
     printf("{CODE}\n");
-
-	printf("\n\nend of processing!\n");
-
-    hf_kill(hf_selfid());
 }
-
 
 /**
     Receive pixel vector and applies the requested filter
     Buffer format: [task, position, [pixel_vector]]
-    if task is poison_pill, then this process must die
+    if task is KILL, then this process must die
 */
-void worker(void){
+void slave(void){
     uint8_t keep_alive = 1, result_block[BLOCK_SIZE][BLOCK_SIZE];
-    uint16_t cpu, src_port, size,i;
+    uint16_t cpu, src_port, size, i;
     int16_t val ,ch;
     int8_t buf[MSG_SIZE];
     union Package package;
     init_block(result_block);
-
 
     delay_ms(50);
     if (hf_comm_create(hf_selfid(), 5000, 0))
@@ -349,26 +355,26 @@ void worker(void){
         if (ch >= 0) {
             val = hf_recvack(&cpu, &src_port, buf, &size, ch);
             if (val){
-                printf("\n[WORKER %d] hf_recvack(): error %d\n", cpu, val);
+                printf("\n[slave %d] hf_recvack(): error %d\n", cpu, val);
             } else {
                 // decode buffer into a union to retrieve struct
                 for (i = 0; i < MSG_SIZE; i++){
                     package.raw_data[i] = buf[i];
                 }
-                printf("\n[WORKER %d] Receive block %d,%d \n", hf_cpuid(), package.data.block_line, package.data.block_column);
-                if (package.data.flag == POISON_PILL){
+                printf("\n[slave %d] Receive block %d,%d \n", hf_cpuid(), package.data.block_line, package.data.block_column);
+                if (package.data.flag == KILL){
                     keep_alive = 0;
                 } else {
-                    package.data.flag = KEEP_ALIVE; 
+                    // package.data.flag = KEEP_ALIVE; 
 
                     do_gausian(package.data.pixels, result_block);
                     do_sobel(result_block, package.data.pixels);
                     
 					delay_ms(random() % 10 + 50);
-                    val = hf_sendack(MASTER, 1000, package.raw_data, MSG_SIZE, hf_cpuid(), 500);
+                    val = hf_sendack(BUILDER, 6000, package.raw_data, MSG_SIZE, hf_cpuid(), 500);
 
                     if (val)
-                        printf("[WORKER %d] Error sending the message to master. Val = %d \n", hf_cpuid(), val);
+                        printf("[slave %d] Error sending the message to builder. Val = %d \n", hf_cpuid(), val);
                 }
             }
         }
@@ -381,8 +387,11 @@ void app_main(void) {
     if (hf_cpuid() == MASTER){
         printf("\nCriando Mestre...\n");
         hf_spawn(master, 0, 0, 0, "master", 200000);
-	} else {
+    } else if (hf_cpuid() == BUILDER) {
+        printf("\nCriando Builder...\n");
+        hf_spawn(builder, 0, 0, 0, "builder", 200000);
+    } else{
         printf("\nCriando escravo %d...\n", hf_cpuid());
-        hf_spawn(worker, 0, 0, 0, "slave", 100000);
+        hf_spawn(slave, 0, 0, 0, "slave", 100000);
     }
 }
